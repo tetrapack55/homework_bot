@@ -14,6 +14,7 @@ import time
 
 from dotenv import load_dotenv
 from http import HTTPStatus
+from json import JSONDecodeError
 from requests import HTTPError, RequestException
 
 load_dotenv()
@@ -35,6 +36,9 @@ HOMEWORK_VERDICTS = {
     'rejected': 'Работа проверена: у ревьюера есть замечания.'
 }
 
+NO_TOKEN_MSG = ('Программа принудительно остановлена.'
+                ' Отсутствует обязательная переменная окружения: ')
+
 
 class UnknownStatusError(Exception):
     """Получен неизвестный статус."""
@@ -43,12 +47,13 @@ class UnknownStatusError(Exception):
 def check_tokens():
     """Проверяет доступность переменных окружения."""
     token_names = ('PRACTICUM_TOKEN', 'TELEGRAM_TOKEN', 'TELEGRAM_CHAT_ID')
-    message = ('Программа принудительно остановлена.'
-               ' Отсутствует обязательная переменная окружения: ')
+    no_token_list = []
     for token in token_names:
         if globals()[token] is None:
-            logger.critical(f'{message}{token}')
-            return False
+            no_token_list.append(token)
+    if no_token_list:
+        logger.critical(f'{NO_TOKEN_MSG}{", ".join(no_token_list)}')
+        return False
     return True
 
 
@@ -56,13 +61,14 @@ def send_message(bot, message):
     """Отправляет сообщение в Telegram чат."""
     try:
         bot.send_message(TELEGRAM_CHAT_ID, message)
-        logger.debug(
-            f'Сообщение в Telegram отправлено: {message}')
     except telegram.TelegramError as telegram_error:
         logger.error(
             f'Сообщение {message} в Telegram чат {TELEGRAM_CHAT_ID}'
             f' не отправлено: {telegram_error}!'
         )
+    else:
+        logger.debug(
+            f'Сообщение в Telegram отправлено: {message}')
 
 
 def get_api_answer(timestamp):
@@ -76,11 +82,16 @@ def get_api_answer(timestamp):
             f'Ошибка при запросе к API {ENDPOINT} c заголовком {HEADERS}'
             f' и параметрами {payload}: {error}!'
         )
-    if homework_statuses.status_code != HTTPStatus.OK:
-        status_code = homework_statuses.status_code
-        logger.error(f'Ошибка {status_code}!')
-        raise HTTPError(f'Ошибка {status_code}!')
-    return homework_statuses.json()
+    else:
+        if homework_statuses.status_code != HTTPStatus.OK:
+            status_code = homework_statuses.status_code
+            logger.error(f'Ошибка {status_code}!')
+            raise HTTPError(f'Ошибка {status_code}!')
+        try:
+            return homework_statuses.json()
+        except JSONDecodeError as json_error:
+            logger.error(f'Ответ API не в формате json: {json_error}')
+            raise JSONDecodeError(f'Ответ API не в формате json: {json_error}')
 
 
 def check_response(response):
@@ -92,7 +103,7 @@ def check_response(response):
     keys = ('homeworks', 'current_date')
     for key in keys:
         try:
-            response.get(f'{key}')
+            response[f'{key}']
         except KeyError:
             logger.error(
                 f'В ответе API от {ENDPOINT} на запрос '
@@ -103,15 +114,12 @@ def check_response(response):
                 f'с заголовком {HEADERS} отсутствует ключ {key}'
             )
 
-    homeworks = response.get('homeworks')
+    homeworks = response['homeworks']
     if type(homeworks) is not list:
         logger.error('Данные по ключу homeworks не являются списком!')
         raise TypeError('Данные по ключу homeworks не являются списком!')
 
     homework = homeworks[0]
-    if not homework:
-        logger.error('Список проверяемых домашних работ пуст!')
-        raise IndexError('Список проверяемых домашних работ пуст!')
     return homework
 
 
@@ -146,7 +154,7 @@ def main():
     LAST_STATUS = ''
     ERROR = ''
     if not check_tokens():
-        sys.exit([1])
+        sys.exit(1)
     send_message(bot, 'Запрашиваю статус!')
     while True:
         try:
@@ -158,7 +166,8 @@ def main():
                 LAST_STATUS = message
             else:
                 logger.debug('Статус работы не изменился.')
-            time.sleep(RETRY_PERIOD)
+        except IndexError:
+            logger.debug('Домашнюю работу еще не взяли на ревью!')
         except Exception as error:
             logger.error(error)
             error_message = str(error)
